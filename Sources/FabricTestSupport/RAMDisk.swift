@@ -1,5 +1,5 @@
 import Foundation
-import iSCSIKit
+import FabricKit
 #if canImport(Darwin)
 import Darwin
 #else
@@ -33,8 +33,8 @@ public enum TargetDiskError: Error, Sendable {
 /// backing store as this process sees it; model power loss with `crash()`,
 /// not by killing the process.
 public actor RAMDisk {
-    public let blockSize: Int
-    public let capacityBlocks: UInt64
+    public nonisolated let blockSize: Int
+    public nonisolated let capacityBlocks: UInt64
 
     /// `.memory` backing.
     private var storage: Data

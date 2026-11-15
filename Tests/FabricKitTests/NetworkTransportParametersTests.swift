@@ -1,7 +1,7 @@
 #if canImport(Network)
 import Network
 import Testing
-@testable import iSCSIKit
+@testable import FabricKit
 
 /// The TCP options are set where Network.framework reads them. Until
 /// 2026-10-05 they were set on a cast of the *IP* options that always failed,

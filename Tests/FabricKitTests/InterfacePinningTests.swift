@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import iSCSIKit
+@testable import FabricKit
 
 /// The decision behind interface pinning, with no network: which addresses a
 /// pin binds and connects to, and when strict fails versus prefer falls back.

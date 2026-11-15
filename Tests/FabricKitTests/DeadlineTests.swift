@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import iSCSIKit
+@testable import FabricKit
 
 /// `withDeadline` is the last line of defence between a stuck target and a
 /// wedged Mac: the daemon's XPC reply, the FSKit extension's read, DiskImages

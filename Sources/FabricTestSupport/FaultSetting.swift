@@ -26,8 +26,8 @@ public enum FaultSetting {
         "unsolicitedr2t", "dropduringdatain", "statsnjump",
     ]
 
-    /// Faults only the NVMe/TCP target reads; `MockTarget` never consults
-    /// them.
+    /// Faults only the NVMe/TCP target (NVMeKit's `MockNVMeSubsystem`)
+    /// reads; iSCSIKit's `MockTarget` never consults them.
     public static let nvmeOnly: Set<String> = ["holdioms"]
 
     /// Apply `name` = `value` (nil: no value given) to `faults`.

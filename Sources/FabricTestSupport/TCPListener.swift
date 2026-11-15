@@ -1,13 +1,13 @@
 #if canImport(Network)
 import Foundation
 import Network
-import iSCSIKit
+import FabricKit
 
 /// A TCP listener serving one target connection per accepted socket: an
 /// ephemeral port for socket-level tests, a fixed port for the standalone
 /// simulator. Tracks live connections so `drop` can kill them. What serves
 /// a connection is injected, so the same listener fronts an iSCSI
-/// `MockTarget` or an NVMe/TCP `MockNVMeSubsystem`.
+/// `MockTarget` (iSCSIKit) or an NVMe/TCP `MockNVMeSubsystem` (NVMeKit).
 public actor MockTargetServer {
     public typealias Handler = @Sendable (any ConnectionTransport) async -> Void
 
@@ -32,19 +32,8 @@ public actor MockTargetServer {
     public private(set) var acceptedCount = 0
     public private(set) var refusedWhilePaused = 0
 
-    /// The iSCSI form: one `MockTarget` per connection over a shared disk.
-    public init(
-        port: UInt16 = 0,
-        disk: RAMDisk = RAMDisk(),
-        faultBox: FaultBox = FaultBox(),
-        config: @escaping @Sendable () -> MockTargetConfig = { MockTargetConfig() }
-    ) throws {
-        try self.init(port: port) { transport in
-            await MockTarget(config: config(), disk: disk, faultBox: faultBox, transport: transport).run()
-        }
-    }
-
-    /// The general form: `serve` runs one accepted connection to completion.
+    /// `serve` runs one accepted connection to completion. iSCSIMockTarget
+    /// and NVMeMockTarget add initializers that serve their own targets.
     public init(port: UInt16 = 0, serve: @escaping Handler) throws {
         self.serve = serve
         if port == 0 {

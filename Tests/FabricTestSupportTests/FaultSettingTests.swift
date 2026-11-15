@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import MockTarget
+@testable import FabricTestSupport
 
 /// The simulator's `fault <name> [value]`: a value it cannot read, or a
 /// fault the served protocol never consults, is an error that leaves the

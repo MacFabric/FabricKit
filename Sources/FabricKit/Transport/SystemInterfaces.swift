@@ -3,8 +3,8 @@ import Darwin
 import Foundation
 
 /// The interfaces and addresses the kernel reports right now. Lives beside
-/// `NetworkTransport` because it reads system state, which the rest of
-/// iSCSIKit deliberately does not.
+/// `NetworkTransport` because it reads system state, which the protocol
+/// engines deliberately do not.
 public enum SystemInterfaces {
     /// Every interface `getifaddrs` lists, and the IPv4/IPv6 addresses of
     /// those that are up and running. Read fresh on every call: DHCP and a

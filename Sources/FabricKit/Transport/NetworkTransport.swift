@@ -3,8 +3,8 @@ import Foundation
 import Network
 import os
 
-/// TCP transport over Network.framework for a real iSCSI connection.
-/// Used by the daemon and by `iscsictl` against a live target.
+/// TCP transport over Network.framework for a real iSCSI or NVMe/TCP
+/// connection: Nagle off, keepalive on, optionally pinned to one interface.
 public final class NetworkTransport: ConnectionTransport, ConnectionPathReporting, @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "iscsi.transport")

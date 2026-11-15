@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import iSCSIKit
+@testable import FabricKit
 
 @Suite("CRC32C digest")
 struct CRC32CTests {
