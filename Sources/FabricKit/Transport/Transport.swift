@@ -5,11 +5,27 @@ import Foundation
 public protocol ConnectionTransport: Sendable {
     /// Deliver bytes to the peer. Throws when the connection is down.
     func send(_ data: Data) async throws
+    /// Deliver several buffers as one run of bytes: in order, with nothing
+    /// from any other send between them. For a PDU whose header and payload
+    /// live in different buffers, and for a sequence of PDUs that must stay
+    /// together; either way the payload is not copied into a joined buffer
+    /// first. The default joins and calls `send(_:)`, which is correct for
+    /// any transport and saves nothing.
+    func send(contentsOf parts: [Data]) async throws
     /// Next chunk from the peer; nil on orderly EOF. Chunk boundaries carry
     /// no meaning — the deframer reassembles PDUs.
     func receive() async throws -> Data?
     /// Tear down; pending receives complete with nil/error.
     func close() async
+}
+
+extension ConnectionTransport {
+    public func send(contentsOf parts: [Data]) async throws {
+        if parts.count == 1 { return try await send(parts[0]) }
+        var joined = Data(capacity: parts.reduce(0) { $0 + $1.count })
+        for part in parts { joined.append(part) }
+        try await send(joined)
+    }
 }
 
 public enum TransportError: Error, Equatable, Sendable {
