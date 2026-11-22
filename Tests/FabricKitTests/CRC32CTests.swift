@@ -89,3 +89,97 @@ struct CRC32CAccelTests {
         }
     }
 }
+
+// MARK: - Three streams at once
+
+@Suite("CRC32C folding")
+struct CRC32CFoldingTests {
+    /// CRC-32C one bit at a time: no table, no instruction, nothing shared
+    /// with the implementation under test.
+    static func reference(_ crc: UInt32, _ bytes: UnsafeRawBufferPointer) -> UInt32 {
+        var crc = crc
+        for byte in bytes {
+            crc ^= UInt32(byte)
+            for _ in 0 ..< 8 { crc = (crc >> 1) ^ (crc & 1 == 1 ? 0x82F6_3B78 : 0) }
+        }
+        return crc
+    }
+
+    /// x^n mod P in the instruction's bit order, where bit 31 is x^0.
+    static func xPower(_ n: Int) -> UInt32 {
+        var v: UInt32 = 0x8000_0000
+        for _ in 0 ..< n { v = (v >> 1) ^ (v & 1 == 1 ? 0x82F6_3B78 : 0) }
+        return v
+    }
+
+    /// The constants in ccrc32c.c, derived again: x^(16N-33) and x^(8N-33).
+    @Test func theFoldingConstantsAreWhatTheMathSays() {
+        #expect(Self.xPower(16 * 4096 - 33) == 0x54A8_6326)
+        #expect(Self.xPower(8 * 4096 - 33) == 0x82F8_9C77)
+        #expect(Self.xPower(16 * 512 - 33) == 0x1700_76FA)
+        #expect(Self.xPower(8 * 512 - 33) == 0xDD7E_3B0C)
+        #expect(Self.xPower(16 * 64 - 33) == 0x0D3B_6092)
+        #expect(Self.xPower(8 * 64 - 33) == 0x9E4A_DDF8)
+    }
+
+    private static let noise: [UInt8] = {
+        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+        return (0 ..< 70_000).map { _ in
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return UInt8(truncatingIfNeeded: state >> 33)
+        }
+    }()
+
+    /// Every length around each block size's threshold and its multiples,
+    /// which is where a stream boundary or a leftover tail would go wrong.
+    @Test func everyLengthAroundEachBlockSizeMatchesTheReference() {
+        var lengths = Set(0 ... 600)
+        for edge in [3 * 64, 6 * 64, 3 * 512, 3 * 512 + 3 * 64, 6 * 512, 3 * 4096, 3 * 4096 + 3 * 512,
+                     6 * 4096, 65536, 65536 + 48] {
+            for delta in -9 ... 9 { lengths.insert(edge + delta) }
+        }
+        Self.noise.withUnsafeBytes { all in
+            for length in lengths.sorted() {
+                let slice = UnsafeRawBufferPointer(rebasing: all[0 ..< length])
+                #expect(CRC32C.update(CRC32C.initial, slice) == Self.reference(CRC32C.initial, slice),
+                        "length \(length)")
+            }
+        }
+    }
+
+    /// The loads are unaligned on purpose: a data segment starts wherever the
+    /// network left it. And the running CRC coming in is arbitrary, not the
+    /// initial value: stream A carries it through the fold.
+    @Test func anyAlignmentAndAnyIncomingStateMatchesTheReference() {
+        Self.noise.withUnsafeBytes { all in
+            for offset in 0 ..< 9 {
+                for length in [191, 192, 200, 1536, 1543, 12288, 12301, 40_000] {
+                    for seed: UInt32 in [0, 0xFFFF_FFFF, 0x1234_5678, 0x8000_0001] {
+                        let slice = UnsafeRawBufferPointer(rebasing: all[offset ..< offset + length])
+                        #expect(CRC32C.update(seed, slice) == Self.reference(seed, slice),
+                                "offset \(offset) length \(length) seed \(seed)")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Chained over arbitrary pieces, as the framer does for a segment and
+    /// its padding, it still comes to the one-shot value.
+    @Test func chainingAcrossPiecesOfEverySizeMatchesOneShot() {
+        Self.noise.withUnsafeBytes { all in
+            let whole = UnsafeRawBufferPointer(rebasing: all[0 ..< 50_000])
+            let expected = Self.reference(CRC32C.initial, whole)
+            for piece in [1, 7, 64, 191, 193, 1000, 4096, 12288, 12289, 30_000] {
+                var crc = CRC32C.initial
+                var at = 0
+                while at < whole.count {
+                    let end = min(at + piece, whole.count)
+                    crc = CRC32C.update(crc, UnsafeRawBufferPointer(rebasing: whole[at ..< end]))
+                    at = end
+                }
+                #expect(crc == expected, "pieces of \(piece)")
+            }
+        }
+    }
+}

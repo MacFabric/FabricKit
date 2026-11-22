@@ -11,6 +11,11 @@
 
 #if defined(__aarch64__)
 #define ISCSI_CRC32C_HW 1
+#if defined(__ARM_FEATURE_AES)
+/* Carry-less multiply (PMULL) is there too: three streams at once, below. */
+#define ISCSI_CRC32C_FOLD 1
+#include <arm_neon.h>
+#endif
 #elif defined(__x86_64__) && defined(__SSE4_2__)
 #define ISCSI_CRC32C_HW 1
 #include <nmmintrin.h>
@@ -42,11 +47,65 @@ static void build_table(void) {
 }
 #endif
 
+#if defined(ISCSI_CRC32C_FOLD)
+/*
+ * Three streams at once.
+ *
+ * The CRC32C instruction has a three-cycle latency and the next one needs its
+ * result, so a single chain runs at a third of what the core can issue. Three
+ * independent chains over three adjacent blocks of N bytes fill that gap: A
+ * continues the running CRC, B and C start from zero. They are then joined.
+ *
+ * Joining: a CRC state is a polynomial mod P, and running it over n more
+ * bytes of zeros multiplies it by x^(8n). So the state after A, B, C is
+ *
+ *     A * x^(16N)  +  B * x^(8N)  +  C        (mod P)
+ *
+ * A carry-less multiply of two 32-bit values in this bit order yields their
+ * product times x, and reducing those 64 bits with the CRC32C instruction
+ * (from a zero state) multiplies by another x^32. So multiplying a state by
+ * x^k takes one PMULL by the constant x^(k-33) mod P and one CRC32C
+ * instruction; the two products are XORed first and reduced together.
+ *
+ * The constants are x^(16N-33) and x^(8N-33) mod P for each block size, in
+ * the instruction's reflected bit order (bit 31 is x^0). CRC32CTests derives
+ * them again and checks every block size against a bit-at-a-time reference.
+ */
+static inline uint64_t clmul32(uint32_t a, uint32_t k) {
+    return vgetq_lane_u64(vreinterpretq_u64_p128(vmull_p64(a, k)), 0);
+}
+
+#define ISCSI_CRC32C_3WAY(N, K_FAR, K_NEAR)                                   \
+    while (len >= 3 * (N)) {                                                   \
+        uint32_t b = 0, c = 0;                                                 \
+        for (size_t i = 0; i < (N); i += 8) {                                  \
+            uint64_t wa, wb, wc;                                               \
+            memcpy(&wa, p + i, 8);                                             \
+            memcpy(&wb, p + (N) + i, 8);                                       \
+            memcpy(&wc, p + 2 * (N) + i, 8);                                   \
+            crc = __builtin_arm_crc32cd(crc, wa);                              \
+            b = __builtin_arm_crc32cd(b, wb);                                  \
+            c = __builtin_arm_crc32cd(c, wc);                                  \
+        }                                                                      \
+        crc = __builtin_arm_crc32cd(0, clmul32(crc, (K_FAR)) ^ clmul32(b, (K_NEAR))) ^ c; \
+        p += 3 * (N);                                                          \
+        len -= 3 * (N);                                                        \
+    }
+#endif
+
 uint32_t iscsi_crc32c(uint32_t crc, const void *data, size_t len) {
     const uint8_t *p = (const uint8_t *)data;
 
+#if defined(ISCSI_CRC32C_FOLD)
+    /* Largest blocks first; what is left after the smallest (under 192
+     * bytes) goes down the single chain below. */
+    ISCSI_CRC32C_3WAY(4096, 0x54A86326u, 0x82F89C77u)
+    ISCSI_CRC32C_3WAY(512, 0x170076FAu, 0xDD7E3B0Cu)
+    ISCSI_CRC32C_3WAY(64, 0x0D3B6092u, 0x9E4ADDF8u)
+#endif
+
 #if ISCSI_CRC32C_HW
-    /* Chew 8 bytes per instruction, then finish the tail a byte at a time.
+    /* One chain: 8 bytes per instruction, then the tail a byte at a time.
      * memcpy rather than a cast: the callers hand us arbitrary slices of
      * network buffers, which are not guaranteed to be 8-byte aligned, and a
      * misaligned 64-bit load is undefined behaviour even where it happens to
