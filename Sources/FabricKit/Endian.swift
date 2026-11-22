@@ -4,13 +4,37 @@ import Foundation
 /// to `startIndex`, so these work uniformly on slices returned by the framer.
 extension Data {
 
+    /// Trap, as a subscript would, before a raw load or store can touch
+    /// bytes outside this buffer: the unsafe accessors below check their
+    /// offsets only in debug builds, and these fields come off the network.
+    @inline(__always)
+    private func checkRange(_ offset: Int, _ width: Int) {
+        precondition(offset >= 0 && width <= count && offset <= count - width,
+                     "field outside the buffer")
+    }
+
+    /// One load of the whole field. Reading it a byte at a time through the
+    /// subscript cost four bounds checks and four accesses for a 32-bit
+    /// field; a PDU header is a dozen of them.
+    @inline(__always)
+    private func load<T: FixedWidthInteger>(_ offset: Int, as type: T.Type) -> T {
+        checkRange(offset, MemoryLayout<T>.size)
+        return withUnsafeBytes { T(bigEndian: $0.loadUnaligned(fromByteOffset: offset, as: T.self)) }
+    }
+
+    @inline(__always)
+    private mutating func store<T: FixedWidthInteger>(_ value: T, _ offset: Int) {
+        checkRange(offset, MemoryLayout<T>.size)
+        withUnsafeMutableBytes { $0.storeBytes(of: value.bigEndian, toByteOffset: offset, as: T.self) }
+    }
+
     public func u8(_ offset: Int) -> UInt8 {
         self[startIndex + offset]
     }
 
 
     public func beU16(_ offset: Int) -> UInt16 {
-        UInt16(u8(offset)) << 8 | UInt16(u8(offset + 1))
+        load(offset, as: UInt16.self)
     }
 
     /// 24-bit big-endian field (used by DataSegmentLength).
@@ -21,12 +45,12 @@ extension Data {
 
 
     public func beU32(_ offset: Int) -> UInt32 {
-        UInt32(beU16(offset)) << 16 | UInt32(beU16(offset + 2))
+        load(offset, as: UInt32.self)
     }
 
 
     public func beU64(_ offset: Int) -> UInt64 {
-        UInt64(beU32(offset)) << 32 | UInt64(beU32(offset + 4))
+        load(offset, as: UInt64.self)
     }
 
 
@@ -41,8 +65,7 @@ extension Data {
 
 
     public mutating func setBE16(_ v: UInt16, _ offset: Int) {
-        setU8(UInt8(v >> 8), offset)
-        setU8(UInt8(v & 0xFF), offset + 1)
+        store(v, offset)
     }
 
 
@@ -55,14 +78,12 @@ extension Data {
 
 
     public mutating func setBE32(_ v: UInt32, _ offset: Int) {
-        setBE16(UInt16(v >> 16), offset)
-        setBE16(UInt16(v & 0xFFFF), offset + 2)
+        store(v, offset)
     }
 
 
     public mutating func setBE64(_ v: UInt64, _ offset: Int) {
-        setBE32(UInt32(v >> 32), offset)
-        setBE32(UInt32(v & 0xFFFF_FFFF), offset + 4)
+        store(v, offset)
     }
 
 
