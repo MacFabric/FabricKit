@@ -1,7 +1,7 @@
 #if canImport(Network)
 import Foundation
 import Testing
-import FabricKit
+@testable import FabricKit
 @testable import FabricTestSupport
 
 /// `send(contentsOf:)` over real TCP. A PDU goes out as a header and a
@@ -99,6 +99,55 @@ struct MultiPartSendTests {
         try await client.send(Data())
         try await client.send(Data([4]))
         #expect(await sink.wait(for: 4) == Data([1, 2, 3, 4]))
+        await client.close()
+        await server.stop()
+    }
+
+    /// Large parts go to the connection as references to the caller's
+    /// bytes, not copies. Whatever the bytes are kept in, what arrives must
+    /// be what was handed over at the time of the send, even when the caller
+    /// changes its buffer before the peer has read a byte.
+    @Test("bytes sent without a copy arrive as they were when sent")
+    func noCopySendsArriveIntact() async throws {
+        let sink = Sink()
+        let gate = AsyncStream<Void>.makeStream()
+        let server = try MockTargetServer { transport in
+            // Not reading yet: the send sits in the connection.
+            for await _ in gate.stream { break }
+            while let chunk = try? await transport.receive() { await sink.append(chunk) }
+        }
+        let port = try await server.start()
+        let client = try await NetworkTransport.connect(host: "127.0.0.1", port: port)
+        let size = 4 << 20
+        #expect(size > NetworkTransport.noCopyThreshold)
+
+        func pattern(_ seed: UInt8) -> Data {
+            Data((0 ..< size).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ Int(seed)) })
+        }
+        // A native buffer, sliced; one bridged from NSData, as a buffer that
+        // crossed XPC is; and one that wraps memory it does not own.
+        var native = pattern(1)
+        let bridged = NSData(data: pattern(2)) as Data
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: size, alignment: 16)
+        pattern(3).copyBytes(to: raw.assumingMemoryBound(to: UInt8.self), count: size)
+        let wrapped = Data(bytesNoCopy: raw, count: size, deallocator: .custom { p, _ in p.deallocate() })
+
+        let first = native[100...]
+        let second = bridged[7 ..< size - 9]
+        let expected = first + second + wrapped
+        let sends = Task {
+            try await client.send(contentsOf: [first, second])
+            try await client.send(wrapped)
+        }
+        // While the bytes are still queued, the caller reuses its buffer.
+        try await Task.sleep(for: .milliseconds(50))
+        native.withUnsafeMutableBytes { _ = memset($0.baseAddress!, 0xEE, $0.count) }
+        gate.continuation.yield()
+        try await sends.value
+
+        let received = await sink.wait(for: expected.count)
+        #expect(received.count == expected.count)
+        #expect(received == expected, "the bytes on the wire changed after they were sent")
         await client.close()
         await server.stop()
     }

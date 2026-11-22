@@ -184,10 +184,34 @@ public final class NetworkTransport: ConnectionTransport, ConnectionPathReportin
         try await send(contentsOf: [data])
     }
 
+    /// Parts at least this large are handed to the connection without a
+    /// copy. Below it the copy is cheaper than the wrapping.
+    static let noCopyThreshold = 16 * 1024
+
+    /// `part` as dispatch data that refers to its bytes and keeps them alive.
+    ///
+    /// `NWConnection.send` copies a `Data` it is given, whole, before it
+    /// returns: 256 MiB sent to a peer that was not reading grew the process
+    /// by 256 MiB at once (measured 2026-11-22), where dispatch data made
+    /// this way grew it by nothing. Bridging to `NSData` does not copy, a
+    /// slice included, and gives a pointer that stays valid for as long as
+    /// the object does; the deallocator holds the object until the
+    /// connection is finished with the bytes. Whoever still holds the `Data`
+    /// cannot change them underneath: its storage is now shared, so a
+    /// mutation copies first.
+    static func withoutCopying(_ part: Data) -> DispatchData {
+        // Immutable, and only ever released by the deallocator below.
+        nonisolated(unsafe) let held = part as NSData
+        return DispatchData(
+            bytesNoCopy: UnsafeRawBufferPointer(start: held.bytes, count: held.length),
+            deallocator: .custom(nil, { withExtendedLifetime(held) {} }))
+    }
+
     /// The parts go to the connection one after another under `handover`,
-    /// each as it is, so a payload is never copied into a joined buffer; the
-    /// send completes when the last of them has been processed. An earlier
-    /// part that fails takes the connection, and so the last part, with it.
+    /// each as it is, so a payload is never copied into a joined buffer, and
+    /// the large ones are not copied at all; the send completes when the
+    /// last of them has been processed. An earlier part that fails takes the
+    /// connection, and so the last part, with it.
     public func send(contentsOf parts: [Data]) async throws {
         let parts = parts.filter { !$0.isEmpty }
         let handover = self.handover
@@ -212,18 +236,26 @@ public final class NetworkTransport: ConnectionTransport, ConnectionPathReportin
                     resumeOnce(.success(()))
                     return
                 }
+                let done = NWConnection.SendCompletion.contentProcessed { error in
+                    if let error {
+                        resumeOnce(.failure(TransportError.connectFailed("\(error)")))
+                    } else {
+                        resumeOnce(.success(()))
+                    }
+                }
+                func hand(_ part: Data, _ completion: NWConnection.SendCompletion) {
+                    if part.count >= Self.noCopyThreshold {
+                        connection.send(content: Self.withoutCopying(part), completion: completion)
+                    } else {
+                        connection.send(content: part, completion: completion)
+                    }
+                }
                 handover.withLockUnchecked {
                     connection.batch {
                         for part in parts.dropLast() {
-                            connection.send(content: part, completion: .contentProcessed { _ in })
+                            hand(part, .contentProcessed { _ in })
                         }
-                        connection.send(content: last, completion: .contentProcessed { error in
-                            if let error {
-                                resumeOnce(.failure(TransportError.connectFailed("\(error)")))
-                            } else {
-                                resumeOnce(.success(()))
-                            }
-                        })
+                        hand(last, done)
                     }
                 }
             }
