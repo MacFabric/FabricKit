@@ -148,7 +148,7 @@ final class NWConnectionTransport: ConnectionTransport, @unchecked Sendable {
 
     func receive() async throws -> Data? {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data?, any Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { data, _, isComplete, error in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { data, _, isComplete, error in
                 if let error {
                     c.resume(throwing: error)
                 } else if let data, !data.isEmpty {

@@ -8,6 +8,10 @@ import os
 public final class NetworkTransport: ConnectionTransport, ConnectionPathReporting, @unchecked Sendable {
     private let connection: NWConnection
     private let queue = DispatchQueue(label: "iscsi.transport")
+    /// Held while one send's buffers are handed to the connection, so the
+    /// parts of a multi-part send stay adjacent on the wire whoever else is
+    /// sending. Never held across a wait: handing over is an enqueue.
+    private let handover = OSAllocatedUnfairLock()
     /// The interface this connection ended up on, and whether a pin fell
     /// back. Written inside `connect`, before the transport is handed out,
     /// and never again.
@@ -177,6 +181,16 @@ public final class NetworkTransport: ConnectionTransport, ConnectionPathReportin
     /// an incomplete send may have left a partial PDU on the wire, so the
     /// stream is off frame boundary; the session layer rebuilds it.
     public func send(_ data: Data) async throws {
+        try await send(contentsOf: [data])
+    }
+
+    /// The parts go to the connection one after another under `handover`,
+    /// each as it is, so a payload is never copied into a joined buffer; the
+    /// send completes when the last of them has been processed. An earlier
+    /// part that fails takes the connection, and so the last part, with it.
+    public func send(contentsOf parts: [Data]) async throws {
+        let parts = parts.filter { !$0.isEmpty }
+        let handover = self.handover
         let resumed = OSAllocatedUnfairLock(initialState: false)
         let connection = self.connection
         try await withTaskCancellationHandler {
@@ -194,22 +208,38 @@ public final class NetworkTransport: ConnectionTransport, ConnectionPathReportin
                     resumeOnce(.failure(CancellationError()))
                     return
                 }
-                connection.send(content: data, completion: .contentProcessed { error in
-                    if let error {
-                        resumeOnce(.failure(TransportError.connectFailed("\(error)")))
-                    } else {
-                        resumeOnce(.success(()))
+                guard let last = parts.last else {
+                    resumeOnce(.success(()))
+                    return
+                }
+                handover.withLockUnchecked {
+                    connection.batch {
+                        for part in parts.dropLast() {
+                            connection.send(content: part, completion: .contentProcessed { _ in })
+                        }
+                        connection.send(content: last, completion: .contentProcessed { error in
+                            if let error {
+                                resumeOnce(.failure(TransportError.connectFailed("\(error)")))
+                            } else {
+                                resumeOnce(.success(()))
+                            }
+                        })
                     }
-                })
+                }
             }
         } onCancel: {
             connection.cancel()
         }
     }
 
+    /// The most one `receive` returns. Each call is a continuation and a hop
+    /// back to the caller's actor, so on a fast link the cap sets how many of
+    /// those a megabyte costs; it was 256 KiB until 2026-11-22.
+    static let maxReceiveBytes = 1 << 20
+
     public func receive() async throws -> Data? {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Data?, any Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { data, _, isComplete, error in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: Self.maxReceiveBytes) { data, _, isComplete, error in
                 if let error {
                     c.resume(throwing: TransportError.connectFailed("\(error)"))
                 } else if let data, !data.isEmpty {
